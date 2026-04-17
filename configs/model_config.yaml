@@ -1,0 +1,243 @@
+# 银行客户订阅预测 - 不平衡数据专用配置
+# 针对11.2%正样本比例的高度不平衡数据集
+
+experiment:
+  name: "Banking_Subscription_Imbalanced"
+  version: "2.0"
+  random_seed: 42
+  enable_gpu: true
+  n_repeats: 3  # 重复实验次数以提高统计稳定性
+
+data:
+  preprocessing:
+    target_column: "y"
+    test_size: 0.2
+    validation_size: 0.1
+    stratify_split: true
+
+  # 专门的不平衡数据处理
+  imbalance_handling:
+    method: "combined"  # options: class_weights, resampling, focal_loss, combined
+    positive_class_weight: 8.0  # 1/0.112 ≈ 8.93，取8.0作为起始值
+
+    resampling:
+      method: "hybrid"  # smote, random_undersample, smote_enn, hybrid
+      sampling_strategy: 0.3  # 将正样本比例提升到30%
+      k_neighbors: 5
+      random_state: 42
+
+    focal_loss:
+      enable: true
+      alpha: 0.8
+      gamma: 2.0
+
+    ensemble_sampling:
+      enable: true
+      n_subsets: 5
+      sampling_ratio: 0.6
+
+  feature_engineering:
+    create_interaction_features: true
+    create_polynomial_features: true
+    create_statistical_features: true
+    create_class_weighted_features: true  # 基于类别权重的特征
+    max_features: 50
+    feature_selection_method: "mutual_info_classif"
+
+model:
+  base_learner: "CatBoost"
+
+  ensemble:
+    n_models: 5
+    aggregation_method: "optimized_weighted_average"  # weighted by validation PR-AUC
+    diversity_strategy: "heterogeneous_imbalanced_configs"
+    use_stacking: true
+    meta_learner: "LogisticRegression"
+
+  # 针对不平衡数据的超参数配置
+  hyperparameters:
+
+    # 贝叶斯优化范围（针对不平衡数据调整）
+    iterations: [800, 3000]  # 更多迭代以学习少数类
+    depth: [3, 8]  # 较浅的树避免过拟合
+    learning_rate: [0.005, 0.15]  # 较小的学习率更稳定
+    l2_leaf_reg: [1e-2, 20]  # 更强的正则化
+    random_strength: [0.5, 3.0]  # 随机强度
+    bagging_temperature: [0.3, 0.8]  # 装袋温度
+
+    # 专门的不平衡参数
+    scale_pos_weight: [5.0, 15.0]  # 根据不平衡比例调整
+    auto_class_weights: ["SqrtBalanced", "Balanced"]
+
+    # 固定参数
+    early_stopping_rounds: 50  # 更早的早停
+    od_type: "Iter"
+    od_wait: 30
+    use_best_model: true
+    verbose: 100
+    eval_metric: "AUC"  # 主评估指标
+
+    # 高级不平衡参数
+    grow_policy: "Lossguide"  # Lossguide更适合不平衡数据
+    min_data_in_leaf: [10, 100]
+    max_leaves: [16, 64]
+    rsm: [0.5, 1.0]  # 特征采样率
+
+  cross_validation:
+    n_folds: 5
+    stratified: true
+    shuffle: true
+    repeat_cv: true  # 重复交叉验证
+    n_repeats: 3
+
+training:
+
+  # 多阶段训练策略
+  multi_stage_training:
+    enable: true
+    stages:
+      - name: "exploration"
+        iterations: 500
+        learning_rate: 0.1
+        objective: "discover_patterns"
+
+      - name: "refinement"
+        iterations: 1500
+        learning_rate: 0.03
+        objective: "optimize_minority_class"
+
+      - name: "final_tuning"
+        iterations: 500
+        learning_rate: 0.01
+        objective: "balance_precision_recall"
+
+  bayesian_optimization:
+    n_trials: 150  # 更多试验
+    sampler: "TPE"
+    direction: "maximize"
+    metric: "f1_score"  # 使用F1作为优化目标
+    early_stopping: true
+    patience: 20
+
+  fine_tuning:
+    enable: true
+    strategy: "gradient_based"
+    learning_rate_decay: 0.1
+    n_iterations: 200
+    class_weight_annealing: true  # 类别权重退火
+
+evaluation:
+
+  # 主评估指标（针对不平衡数据）
+  metrics:
+    primary: "pr_auc"  # PR-AUC对不平衡数据更敏感
+    secondary: ["f1_score", "balanced_accuracy", "g_mean", "mcc"]
+    threshold_metrics: ["f1_score", "g_mean"]
+
+  threshold_optimization:
+    enable: true
+    method: "f1_maximization"  # options: f1_maximization, cost_sensitive, roc_optimization
+    cost_ratio: 5.0  # 假阴性的成本是假阳性的5倍
+
+  confidence_intervals:
+    method: "bootstrap_stratified"  # 分层bootstrap
+    alpha: 0.05
+    n_bootstrap: 2000
+    stratified: true
+
+  statistical_tests:
+    enable: true
+    tests: ["mcnemar", "delong", "bootstrap_difference"]
+    alpha: 0.05
+    multiple_testing_correction: "bonferroni"
+
+  model_calibration:
+    enable: true
+    method: "isotonic_regression"
+    calibration_set: "validation"
+
+interpretability:
+
+  # SHAP分析
+  shap_analysis:
+    enable: true
+    method: "tree"  # tree shap for CatBoost
+    sample_size: 2000
+    background_size: 200
+    stratified_sampling: true
+
+  # 针对不平衡数据的特征重要性
+  feature_importance:
+    method: "shap_class_aware"  # 按类别计算特征重要性
+    top_n_features: 15
+    compute_for_classes: [0, 1]  # 分别计算多数类和少数类的重要性
+
+  interaction_analysis:
+    enable: true
+    method: "shap_interaction"
+    max_interactions: 10
+
+  decision_boundary:
+    enable: true
+    method: "tsne"
+    perplexity: 30
+
+output:
+
+  save_models: true
+  save_predictions: true
+  save_metrics: true
+  save_calibration: true
+
+  # 学术论文级别的输出
+  academic_output:
+    generate_latex_tables: true
+    generate_visualizations: true
+    generate_confidence_intervals: true
+    generate_learning_curves: true
+    generate_precision_recall_curves: true
+    generate_cost_curve: true
+
+  paths:
+    models: "models/imbalanced_experiment/"
+    results: "results/imbalanced_experiment/"
+    logs: "logs/imbalanced_experiment/"
+    visualizations: "figures/imbalanced_experiment/"
+
+  format:
+    decimal_places: 4
+    confidence_interval_format: "brackets"  # [lower, upper]
+    p_value_format: "scientific"
+
+# 特定于银行数据集的配置
+banking_specific:
+
+  # 已知重要特征
+  known_important_features:
+    - "duration"
+    - "euribor3m"
+    - "nr.employed"
+    - "emp.var.rate"
+    - "age"
+
+  # 时间特征处理
+  temporal_features:
+    month:
+      encoding: "cyclical"
+      period: 12
+    day_of_week:
+      encoding: "cyclical"
+      period: 5
+
+  # 业务约束
+  business_constraints:
+    max_false_negative_rate: 0.3  # 不能错过太多潜在客户
+    min_precision: 0.4  # 营销成本约束
+    cost_per_contact: 5.0  # 每次联系的成本
+    revenue_per_conversion: 100.0  # 每次转换的收入
+
+  # 部署考虑
+  deployment:
+    prediction_threshold: 0.3  # 较低的阈值以捕获更多正样本
+    batch_size: 1000
+    latency_requirement: "realtime"
